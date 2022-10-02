@@ -307,13 +307,17 @@ class User:
         return
 
 
-user_obj = User(sys.argv[1], sys.argv[2])
-if len(sys.argv) > 3 and sys.argv[3] == "DO_DEBUG":
-    DO_DEBUG = True
+if len(sys.argv) < 3:
+    print("Usage: python3 User4.py <host_ip> <port>")
 else:
-    DO_DEBUG = False
+    user_obj = User(sys.argv[1], sys.argv[2])
 
-if DO_DEBUG:
-    print("######## DEBUG MODE IS ON ########")
-user_obj.run()
+    if len(sys.argv) > 3 and sys.argv[3] == "DO_DEBUG":
+        DO_DEBUG = True
+        print("######## DEBUG MODE IS ON ########")
+    else:
+        DO_DEBUG = False
+
+    user_obj.run()
+
 print("Exiting...")
