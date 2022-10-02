@@ -1,4 +1,3 @@
-from asyncore import read
 import json
 import logging
 import os
@@ -12,9 +11,10 @@ from time import sleep
 
 class server_communications_thread(threading.Thread):
 
-    def __init__(self, userSocket):
+    def __init__(self, user_socket):
         threading.Thread.__init__(self)
-        self.userSocket = userSocket
+        self.user_socket = user_socket
+        self.user_socket.setblocking(0)
         self.lock = threading.Lock()
         self.message_set = threading.Event()
         self.chats_hisotry = {}
@@ -60,9 +60,9 @@ class server_communications_thread(threading.Thread):
             self.print_chat()
 
     def wait_for_message(self):
-        ready = select.select([self.userSocket])
+        ready = select.select([self.user_socket], [], [])
         if ready[0]:
-            message_len_encoded = self.userSocket.recv(8)
+            message_len_encoded = self.user_socket.recv(8)
             bytes_to_read = int.from_bytes(message_len_encoded, 'big')
             if not isinstance(bytes_to_read, int):
                 raise Exception("Did not get INT for length of incoming message")
@@ -70,7 +70,7 @@ class server_communications_thread(threading.Thread):
             if DO_DEBUG:
                 print(f"DEBUG: BEGINNING TO READ MESSAGE OF {bytes_to_read} BYTES")
             while bytes_to_read > 0:
-                incoming_bytes = self.userSocket.recv(bytes_to_read)
+                incoming_bytes = self.user_socket.recv(bytes_to_read)
                 new_message += incoming_bytes.decode()
                 bytes_to_read -= len(incoming_bytes)
         if DO_DEBUG:
@@ -80,10 +80,20 @@ class server_communications_thread(threading.Thread):
         return json.loads(new_message)
 
     def send_to_server(self, payload):
-        msg_str = json.dumps(payload)
-        self.userSocket.sendall(msg_str.encode())
-        if DO_DEBUG:
-            print(f"DEBUG: SENT {msg_str}")
+        if self.user_socket:
+            json_string = json.dumps(payload)
+            encoded_msg = json_string.encode()
+            message_len = len(encoded_msg)
+            message_len_bytes = message_len.to_bytes(8, 'big')
+
+            full_message = message_len_bytes + encoded_msg
+
+            if DO_DEBUG:
+                print(
+                    f"DEBUG: SENDING {json_string} ({message_len} BYTES). HEADER: {message_len_bytes} ({len(message_len_bytes)} BYTES)")
+            with self.lock:
+                self.user_socket.sendall(full_message)
+
         response = self.get_response()
         return response
 
@@ -244,42 +254,43 @@ class User:
         self.comm_thread.leave_chat()
 
     def login(self):
-        init_connect = self.comm_thread.get_response()
-        if init_connect['status'] == "#welcome":
-            username = input('Enter your username: ')
-            payload = {
-                'type': "#join",
-                'username': username
-            }
-            response = self.comm_thread.send_to_server(payload)
-            if response['type'] != "#login":
-                return False
-            if response['status'] == "#online":
-                self.username = username
-                self.comm_thread.username = username
-                if not DO_DEBUG:
-                    os.system('clear')
-                return True
-
-            elif response['status'] == "#busy":
-                print("You are logged in elsewhere, please log out elsewhere first")
-                return False
-        elif init_connect['status'] == "#busy":
+        init_accept = self.comm_thread.get_response()
+        if init_accept['status'] == 'busy':
             print("Server is busy right now, please try again later")
+            return False
+        elif init_accept['status'] != 'welcome':
+            raise Exception(f"Got unknown acceptance message: {init_accept}")
+
+        if DO_DEBUG:
+            print("DEBUG: CONNECTION ACCEPTED, PROCEEDING TO LOGIN")
+
+        username = input('Enter your username: ')
+        response = self.comm_thread.send_to_server({"type": "login", 'username': username})
+        if response['status'] == "online":
+            self.username = username
+            self.comm_thread.username = username
+            return True
+
+        elif response['status'] == "busy":
+            print("You are logged in elsewhere, please log out elsewhere first")
             return False
 
     def run(self):  # "Main" function for User class
         print(f"Will try connecting to {self.host}:{self.port}")
 
-        trace = None
         try:
-            userSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Create socket to connect to server with
-            userSocket.connect((self.host, self.port))  # Open connection to server on host and port
+            user_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Create socket to connect to server with
+            user_socket.connect((self.host, self.port))  # Open connection to server on host and port
         except:
-            userSocket.close()
+            user_socket.close()
             logging.error(traceback.format_exc())
         # Create new thread for communicating with the server
-        self.comm_thread = server_communications_thread(userSocket)
+        try:
+            self.comm_thread = server_communications_thread(user_socket)
+        except:
+            print("ERROR: Could not create server_comm_thread")
+            logging.error(traceback.format_exc())
+            return
         self.comm_thread.start()
 
         if self.login() == True:
@@ -293,7 +304,6 @@ class User:
         response = self.comm_thread.send_to_server(payload)
         self.do_chat(response['chat_ids'][0])
 
-        print("Exiting...")
         return
 
 
@@ -306,3 +316,4 @@ else:
 if DO_DEBUG:
     print("######## DEBUG MODE IS ON ########")
 user_obj.run()
+print("Exiting...")

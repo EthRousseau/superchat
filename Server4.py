@@ -1,4 +1,3 @@
-from email import message
 import json
 import logging
 import random
@@ -6,6 +5,7 @@ import socket
 import sys
 import threading
 import traceback
+import select
 
 
 class chat():
@@ -114,11 +114,12 @@ class userThread():
 
     def __init__(self, user_socket, username):
         self.user_socket = user_socket
+        self.user_socket.setblocking(0)
         # self.user_socket.setblocking(False)
-        self.username = username  # Not lowered, must be lowered for each sKey lookup
+        self.username = username
 
-        self.friends = []  # Non lowered usernames of which user is friends
-        # Non lowered usernames waiting for this user to accept them (wow so famous)
+        self.friends = []  # Usernames of which user is friends
+        # Usernames waiting for this user to accept them (wow so famous)
         self.incoming_friend_requests = []
 
         self.chats = {}
@@ -132,23 +133,42 @@ class userThread():
     def set_socket(self, new_socket):
         self.user_socket = new_socket
 
-    def send_message(self, msg):
+    def send_message(self, payload):
 
-        if self.user_socket:
-            if DO_DEBUG:
-                print(f"DEBUG: ATTEMPTING TO SEND {msg} TO {self.username}")
-            msg = json.dumps(msg)
-            message_len = len(msg)
-            message_len_bytes = message_len.to_bytes(8, 'big')
+        json_string = json.dumps(payload)
+        encoded_msg = json_string.encode()
+        message_len = len(encoded_msg)
+        message_len_bytes = message_len.to_bytes(8, 'big')
 
-            with self.lock:
-                self.user_socket.sendall(message_len_bytes)
-                if DO_DEBUG:
-                    print(
-                        f"DEBUG: NOTIFIED NEXT MESSAGE IS OF LEN: {message_len}. NOTIFICATION WAS OF SIZE: {len(message_len_bytes)}")
-                self.user_socket.sendall(msg.encode())
+        full_message = message_len_bytes + encoded_msg
+
+        if DO_DEBUG:
+            print(
+                f"DEBUG: SENDING {json_string} TO {self.username} ({message_len} BYTES). HEADER: {message_len_bytes} ({len(message_len_bytes)} BYTES)")
+        with self.lock:
+            self.user_socket.sendall(full_message)
+
+    def receive_user_message(self):
+        ready = select.select([self.user_socket], [], [])
+        if ready[0]:
+            message_len_encoded = self.user_socket.recv(8)
+            bytes_to_read = int.from_bytes(message_len_encoded, 'big')
+            if not isinstance(bytes_to_read, int):
+                raise Exception("Did not get INT for length of incoming message")
+            if bytes_to_read == 0:
+                return None
+            new_message = ""
             if DO_DEBUG:
-                print(f"DEBUG: SENT {message_len} BYTES TO {self.username}")
+                print(f"DEBUG: BEGINNING TO READ MESSAGE OF {bytes_to_read} BYTES FROM {self.username}")
+            while bytes_to_read > 0:
+                incoming_bytes = self.user_socket.recv(bytes_to_read)
+                new_message += incoming_bytes.decode()
+                bytes_to_read -= len(incoming_bytes)
+        if DO_DEBUG:
+            print(f"DEBUG: READ {new_message} OF LEN {len(new_message)} FROM {self.username}")
+        if not new_message:
+            return None
+        return json.loads(new_message)
 
     def add_to_chat(self, chat):
         if not self.chats.get(chat_id := chat.chat_id):
@@ -162,27 +182,20 @@ class userThread():
     # user_msg is expected to be string, not byes
 
     def handle_user_message(self, user_msg):
-        if not user_msg:
-            return "EXIT"
-        try:
-            user_msg_json = json.loads(user_msg)
-        except:
-            print("ERROR: Non JSON passed to handle_user_message")
-            return "EXIT"
         if DO_DEBUG:
-            print(f"DEBUG: GOT {user_msg_json} FROM {self.username}")
+            print(f"DEBUG: GOT {user_msg} FROM {self.username}")
 
-        method = user_msg_json.get('method')
-        match user_msg_json['endpoint']:
+        method = user_msg.get('method')
+        match user_msg['endpoint']:
 
             case "message":
                 if method == "POST":
                     new_message = {
                         "message_type": 'standard',
                         "sender": self.username,
-                        "text": user_msg_json['msg']
+                        "text": user_msg['msg']
                     }
-                    server_obj.add_message_to_chat(new_message, user_msg_json['chat_id'])
+                    server_obj.add_message_to_chat(new_message, user_msg['chat_id'])
                     response = {
                         "status": '#POSTED'
                     }
@@ -196,8 +209,8 @@ class userThread():
 
             case "chat_history":
                 if method == "GET":
-                    messages = server_obj.all_chats[user_msg_json['chat_id']
-                                                    ].get_chat_history(user_msg_json['last_message_id'])
+                    messages = server_obj.all_chats[user_msg['chat_id']
+                                                    ].get_chat_history(user_msg['last_message_id'])
                     if len(messages) == 0:
                         newest_message_id = 0
                     else:
@@ -212,13 +225,13 @@ class userThread():
                     print("TODO: Get online users list")
 
                 if method == "POST":
-                    if user_msg_json['new_state'] == 'offline':  # User wants to leave
+                    if user_msg['new_state'] == 'offline':  # User wants to leave
                         response = {
                             "status": 'confirm_offline',
                         }
 
             case "change_active_chat":
-                chat_id = user_msg_json['chat_id']
+                chat_id = user_msg['chat_id']
                 if chat_id == None:
                     if self.active_chat != None:
                         self.chats[self.active_chat].user_leave(self)
@@ -240,7 +253,7 @@ class userThread():
                     }
 
             case "get_active_users":
-                users_list = self.chats.get(user_msg_json['chat_id']).get_active_users()
+                users_list = self.chats.get(user_msg['chat_id']).get_active_users()
                 response = {
                     "active_users": users_list
                 }
@@ -250,8 +263,10 @@ class userThread():
     def listen_to_user(self):
         try:
             while True:
-                user_msg = self.user_socket.recv(1024)
-                response = self.handle_user_message(user_msg.decode())
+                user_msg = self.receive_user_message()
+                if user_msg == None:
+                    break
+                response = self.handle_user_message(user_msg)
                 if response == "EXIT":
                     break
                 self.send_message(response)
@@ -284,71 +299,104 @@ class Server:
         else:  # Otherwise, use CLI inputs
             self.port = int(port)
 
-        self.known_users = {}  # Dict of users who have logged into the "app". Keys are usernames.lower() and values are user_thread objects
+        self.known_users = {}  # Dict of users who have logged into the "app". Keys are usernames and values are user_thread objects
         self.max_users = 5  # Max number of users that can be connected to the server at any time
-        self.connected_users = []  # List of users who are CURRENTLY connected to the app. Values are user_thread objects
+        self.connected_users = {}  # List of users who are CURRENTLY connected to the app. Values are user_thread objects
         self.server_lock = threading.Lock()  # Thread lock
         self.all_chats = {}  # Dict of all chat rooms that exist, Keys are chat_id and values are chat objects
 
     def connect_user(self, user_thread):
         online_status = {
-            "type": "#login",
-            "status": "#online"
+            "status": "online"
         }
         user_thread.send_message(online_status)
         if DO_DEBUG:
             print(f"DEBUG: CONIRM JOIN: {user_thread.username}")
         with self.server_lock:
-            self.connected_users.append(user_thread)
+            self.connected_users[user_thread.username] = user_thread
 
     def set_user_offline(self, user_thread):
         with self.server_lock:
             print(f"{user_thread.username} is going offline")
-            self.connected_users.remove(user_thread)
+            del self.connected_users[user_thread.username]
 
-    def init_user_connection(self, user_socket):
-        self.send_message(user_socket, {"status": "#welcome"})
-        message = user_socket.recv(1024).decode()
-        if not message:
-            return
-        new_username_dict = json.loads(message)
-        if new_username_dict['type'] != "#join":
-            raise Exception(f"Expected #join message for new user but got {new_username_dict['type']}")
+    def init_user_connection(self, user_socket, user_address):
+        try:
+            self.send_message({"status": "welcome"}, user_socket, user_address)
+            message = self.recieve_message(user_socket, user_address)
+            if message == None:
+                raise Exception("ERROR: Got None response from user")
 
-        new_username = new_username_dict['username']
-        for user in self.connected_users:
-            if user.username == new_username:
-                online_status = {
-                    "type": "#login",
-                    "status": "#busy"
-                }
-                self.send_message(user_socket, online_status)
+            if message.get('type') != "login":
+                raise Exception(f"Expected \"login\" but got {message}")
+
+            new_username = message['username']
+            if new_username in list(self.connected_users.keys()):  # User is already logged in
+                self.send_message({"status": "busy"}, user_socket, user_address)
                 user_socket.close()
                 return
-        if not (user_thread := self.known_users.get(new_username.lower())):
-            # This is a brand new user
-            user_thread = userThread(user_socket, new_username)
-            self.known_users[new_username.lower()] = user_thread
-        else:
-            # This user already exists, set their connection to use the new socket
-            # this is so the users data can continue to exist between sessions,
-            # but their connection can update to accomodate a new one.
-            user_thread.set_socket(user_socket)
-            print(f"{new_username} is back!")
-        self.connect_user(user_thread)
-        if len(self.all_chats) == 0:
-            base_chat = self.get_new_chat()
-        else:
-            base_chat = self.all_chats[0]
-        self.add_user_to_chat(user_thread, base_chat)
-        user_thread.start_user_thread()
 
-    def send_message(self, user_socket, message):
-        message = json.dumps(message)
-        message_len = len(message)
+            if not (user_thread := self.known_users.get(new_username)):  # Brand new user
+                user_thread = userThread(user_socket, new_username)
+                self.known_users[new_username] = user_thread
+
+            else:  # User already exists
+                user_thread.set_socket(user_socket)
+                print(f"{new_username} is back!")
+
+            if DO_DEBUG:
+                print(f"DEBUG: HANDING OFF CONNECTION: {user_address} IS NOW {new_username}")
+
+            self.connect_user(user_thread)
+
+            if len(self.all_chats) == 0:  # This chat stuff is all just for testing ideally user will create their own chat
+                base_chat = self.get_new_chat()
+            else:
+                base_chat = self.all_chats[0]
+            self.add_user_to_chat(user_thread, base_chat)
+
+            user_thread.start_user_thread()
+        except:
+            print(f"ERROR: Could not initialize user connection for {user_address}")
+            logging.error(traceback.format_exc())
+
+    def send_message(self, payload, user_socket, user_address):
+        json_string = json.dumps(payload)
+        encoded_msg = json_string.encode()
+        message_len = len(encoded_msg)
         message_len_bytes = message_len.to_bytes(8, 'big')
-        user_socket.sendall(message_len_bytes)
-        user_socket.sendall(message.encode())
+
+        full_message = message_len_bytes + encoded_msg
+
+        if DO_DEBUG:
+            print(
+                f"DEBUG: SENDING {json_string} TO {user_address} ({message_len} BYTES). HEADER: {message_len_bytes} ({len(message_len_bytes)} BYTES)")
+        with self.server_lock:
+            user_socket.sendall(full_message)
+
+    def recieve_message(self, user_socket, user_address):
+        if DO_DEBUG:
+            print(f"DEBUG: WAITING ON MESSAGE FROM {user_address}")
+        ready = select.select([user_socket], [], [])
+        if ready[0]:
+            message_len_encoded = user_socket.recv(8)
+            bytes_to_read = int.from_bytes(message_len_encoded, 'big')
+            if not isinstance(bytes_to_read, int):
+                raise Exception("Did not get INT for length of incoming message")
+            if bytes_to_read == 0:
+                return None
+            new_message = ""
+            if DO_DEBUG:
+                print(f"DEBUG: BEGINNING TO READ MESSAGE OF {bytes_to_read} BYTES FROM {user_address}")
+            while bytes_to_read > 0:
+                incoming_bytes = user_socket.recv(bytes_to_read)
+                new_message += incoming_bytes.decode()
+                bytes_to_read -= len(incoming_bytes)
+        if DO_DEBUG:
+            print(f"DEBUG: READ {new_message} OF LEN {len(new_message)} FROM {user_address}")
+        if new_message == "":
+            return None
+        return json.loads(new_message)
 
     def get_new_chat(self):
         with self.server_lock:
@@ -388,25 +436,27 @@ class Server:
                     if DO_DEBUG:
                         print(f"DEBUG: NEW CONNECTION: {user_address}")
                     if len(self.connected_users) >= self.max_users:  # Check if busy
-                        user_socket.sendall(json.dumps({"status": "#busy"}).encode())
+                        busy_message = {
+                            "status": "busy"
+                        }
+                        self.send_message(user_socket, busy_message, user_address)
                         user_socket.close()
-                        print(f"Denied {user_address}, max online reached")
+                        print(f"Denied {user_address}, max online users reached")
                         continue
 
-                    init_user_thread = threading.Thread(target=self.init_user_connection, args=[user_socket])
+                    init_user_thread = threading.Thread(target=self.init_user_connection, args=[
+                                                        user_socket, user_address])
                     init_user_thread.start()
 
         except:
             server_socket.close()
-            trace = traceback.format_exc()
-        finally:
-            if trace:
-                print(trace)
-            else:
-                print("Exiting...")
+            logging.error(traceback.format_exc())
+        print("Exiting...")
 
 
 server_obj = Server(sys.argv[1])
 if sys.argv[2]:
     DO_DEBUG = True
+else:
+    DO_DEBUG = False
 server_obj.run()
