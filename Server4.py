@@ -448,6 +448,8 @@ class Server:
                                                         user_socket, user_address])
                     init_user_thread.start()
 
+        except KeyboardInterrupt:
+            server_socket.close()
         except:
             server_socket.close()
             logging.error(traceback.format_exc())
