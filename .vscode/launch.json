@@ -1,0 +1,41 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "args": [
+                "8001",
+                "DO_DEBUG"
+            ],
+            "name": "Run ptE Server",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/HW3/Part-E/Server4.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+        },
+        {
+            "args": [
+                "localhost",
+                "8001",
+            ],
+            "name": "Run ptE User",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/HW3/Part-E/User4.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+        },
+        {
+            "args": [],
+            "name": "Run test file",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/HW3/Part-E/testing.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+        }
+    ]
+}
