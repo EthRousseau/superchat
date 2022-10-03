@@ -14,7 +14,7 @@ class server_communications_thread(threading.Thread):
     def __init__(self, user_socket):
         threading.Thread.__init__(self)
         self.user_socket = user_socket
-        self.user_socket.setblocking(0)
+        self.user_socket.setblocking(True)
         self.lock = threading.Lock()
         self.message_set = threading.Event()
         self.chats_hisotry = {}
@@ -60,21 +60,25 @@ class server_communications_thread(threading.Thread):
             self.print_chat()
 
     def wait_for_message(self):
-        ready = select.select([self.user_socket], [], [])
-        if ready[0]:
-            self.user_socket.settimeout(5.0)
-            message_len_encoded = self.user_socket.recv(8)
-            self.user_socket.settimeout(None)
-            bytes_to_read = int.from_bytes(message_len_encoded, 'big')
-            if not isinstance(bytes_to_read, int):
-                raise Exception("Did not get INT for length of incoming message")
-            new_message = ""
-            if DO_DEBUG:
-                print(f"DEBUG: BEGINNING TO READ MESSAGE OF {bytes_to_read} BYTES")
-            while bytes_to_read > 0:
-                incoming_bytes = self.user_socket.recv(bytes_to_read)
-                new_message += incoming_bytes.decode()
-                bytes_to_read -= len(incoming_bytes)
+        if DO_DEBUG:
+            print("DEBUG: BEGINNING TO WAIT FOR INCOMING MESSAGE")
+        while True:
+            try:
+                message_len_encoded = self.user_socket.recv(8)
+            except socket.timeout:
+                continue
+            finally:
+                break
+        bytes_to_read = int.from_bytes(message_len_encoded, 'big')
+        if not isinstance(bytes_to_read, int):
+            raise Exception("Did not get INT for length of incoming message")
+        new_message = ""
+        if DO_DEBUG:
+            print(f"DEBUG: BEGINNING TO READ MESSAGE OF {bytes_to_read} BYTES")
+        while bytes_to_read > 0:
+            incoming_bytes = self.user_socket.recv(bytes_to_read)
+            new_message += incoming_bytes.decode()
+            bytes_to_read -= len(incoming_bytes)
         if DO_DEBUG:
             print(f"DEBUG: READ {new_message} OF LEN {len(new_message)}")
         if not new_message:
@@ -286,6 +290,7 @@ class User:
         except:
             user_socket.close()
             logging.error(traceback.format_exc())
+            return
         # Create new thread for communicating with the server
         try:
             self.comm_thread = server_communications_thread(user_socket)

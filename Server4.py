@@ -114,7 +114,7 @@ class userThread():
 
     def __init__(self, user_socket, username):
         self.user_socket = user_socket
-        self.user_socket.setblocking(0)
+        self.user_socket.setblocking(True)
         # self.user_socket.setblocking(False)
         self.username = username
 
@@ -149,21 +149,19 @@ class userThread():
             self.user_socket.sendall(full_message)
 
     def receive_user_message(self):
-        ready = select.select([self.user_socket], [], [])
-        if ready[0]:
-            message_len_encoded = self.user_socket.recv(8)
-            bytes_to_read = int.from_bytes(message_len_encoded, 'big')
-            if not isinstance(bytes_to_read, int):
-                raise Exception("Did not get INT for length of incoming message")
-            if bytes_to_read == 0:
-                return None
-            new_message = ""
-            if DO_DEBUG:
-                print(f"DEBUG: BEGINNING TO READ MESSAGE OF {bytes_to_read} BYTES FROM {self.username}")
-            while bytes_to_read > 0:
-                incoming_bytes = self.user_socket.recv(bytes_to_read)
-                new_message += incoming_bytes.decode()
-                bytes_to_read -= len(incoming_bytes)
+        message_len_encoded = self.user_socket.recv(8)
+        bytes_to_read = int.from_bytes(message_len_encoded, 'big')
+        if not isinstance(bytes_to_read, int):
+            raise Exception("Did not get INT for length of incoming message")
+        if bytes_to_read == 0:
+            return None
+        new_message = ""
+        if DO_DEBUG:
+            print(f"DEBUG: BEGINNING TO READ MESSAGE OF {bytes_to_read} BYTES FROM {self.username}")
+        while bytes_to_read > 0:
+            incoming_bytes = self.user_socket.recv(bytes_to_read)
+            new_message += incoming_bytes.decode()
+            bytes_to_read -= len(incoming_bytes)
         if DO_DEBUG:
             print(f"DEBUG: READ {new_message} OF LEN {len(new_message)} FROM {self.username}")
         if not new_message:
