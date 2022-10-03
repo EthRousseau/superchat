@@ -62,7 +62,9 @@ class server_communications_thread(threading.Thread):
     def wait_for_message(self):
         ready = select.select([self.user_socket], [], [])
         if ready[0]:
+            self.user_socket.settimeout(5.0)
             message_len_encoded = self.user_socket.recv(8)
+            self.user_socket.settimeout(None)
             bytes_to_read = int.from_bytes(message_len_encoded, 'big')
             if not isinstance(bytes_to_read, int):
                 raise Exception("Did not get INT for length of incoming message")

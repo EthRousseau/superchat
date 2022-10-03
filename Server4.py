@@ -453,7 +453,7 @@ class Server:
         except:
             server_socket.close()
             logging.error(traceback.format_exc())
-        print("Exiting...")
+        print("\nExiting...")
 
 
 server_obj = Server(sys.argv[1])
