@@ -65,10 +65,9 @@ class server_communications_thread(threading.Thread):
         while True:
             try:
                 message_len_encoded = self.user_socket.recv(8)
+                break
             except socket.timeout:
                 continue
-            finally:
-                break
         bytes_to_read = int.from_bytes(message_len_encoded, 'big')
         if not isinstance(bytes_to_read, int):
             raise Exception("Did not get INT for length of incoming message")
