@@ -89,14 +89,15 @@ class chat():
         self.send_update(user_join_message)
 
     def user_leave(self, user):  # User was active this chat, and is no longer. Still could have access to it
-        with self.chat_lock:
-            del self.active_users[user.username]
-        user_leave_message = {
-            "message_type": 'user_leave',
-            "sender": "SERVER",
-            "about_user": user.username
-        }
-        self.send_update(user_leave_message)
+        if self.active_users.get(user.username):
+            with self.chat_lock:
+                del self.active_users[user.username]
+            user_leave_message = {
+                "message_type": 'user_leave',
+                "sender": "SERVER",
+                "about_user": user.username
+            }
+            self.send_update(user_leave_message)
 
     def get_chat_history(self, last_message):
         with self.chat_lock:
@@ -175,10 +176,15 @@ class userThread():
             if DO_DEBUG:
                 print(f"DEBUG: ADDED CHAT #{chat_id} TO USER: {self.username}")
 
+    def get_active_chat(self):
+        return self.active_chat
+
+    def set_active_chat(self, new_active_chat):
+        self.active_chat = new_active_chat
+
     # Returns either True or False. True if user is still online, false if user is terminating the connection
     # i.e. returns truthyness of "connection will continue"
     # user_msg is expected to be string, not byes
-
     def handle_user_message(self, user_msg):
         if DO_DEBUG:
             print(f"DEBUG: GOT {user_msg} FROM {self.username}")
@@ -233,12 +239,12 @@ class userThread():
                 if chat_id == None:
                     if self.active_chat != None:
                         self.chats[self.active_chat].user_leave(self)
-                    self.active_chat = None
+                    self.set_active_chat(None)
                     response = {
                         "status": 'leftchat',
                     }
                 elif chat := self.chats.get(chat_id):
-                    self.active_chat = chat_id
+                    self.set_active_chat(chat_id)
                     chat.user_join(self)
                     response = {
                         "status": "joinedchat",
@@ -316,6 +322,9 @@ class Server:
     def set_user_offline(self, user_thread):
         with self.server_lock:
             print(f"{user_thread.username} is going offline")
+            if active_chat := user_thread.get_active_chat() != None:
+                user_thread.set_active_chat(None)
+                self.all_chats[active_chat].user_leave(user_thread)
             del self.connected_users[user_thread.username]
 
     def init_user_connection(self, user_socket, user_address):
