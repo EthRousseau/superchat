@@ -1,12 +1,20 @@
 import json
 import logging
 import os
-import select
 import socket
 import sys
 import threading
 import traceback
-from time import sleep
+from datetime import datetime
+from datetime import timedelta
+from time import sleep, time
+
+import PySimpleGUI as gooey
+
+console_height = 40
+console_width = 80
+
+gp = gooey.cprint
 
 
 class server_communications_thread(threading.Thread):
@@ -16,25 +24,28 @@ class server_communications_thread(threading.Thread):
         self.user_socket = user_socket
         self.user_socket.setblocking(True)
         self.lock = threading.Lock()
+        self.response_set = threading.Event()
         self.message_set = threading.Event()
-        self.chats_hisotry = {}
         self.response = None
         self.username = None
         self.active_chat = None
         self.active_chat_users = []
         self.active_user_box = None
+        self.update_buffer = []
+        self.chat_histories = {}
+        self.printer_thread = None
 
     def run(self):
         while True:
             message = self.wait_for_message()
             if not message:  # If the server gives an empty response, exit
                 self.response = None
-                self.message_set.set()
+                self.response_set.set()
                 break
 
             if (message_type := message.get('message_type')) == None:  # Is a response
                 self.response = message
-                self.message_set.set()
+                self.response_set.set()
                 if message.get('status') == 'leftchat':
                     break
                 else:
@@ -43,25 +54,14 @@ class server_communications_thread(threading.Thread):
             if message['chat_id'] != self.active_chat:
                 continue
 
-            if message_type in ["standard", "add_user", "remove_user"]:
+            if message_type in ["standard", "add_user", "remove_user", "user_join", "user_leave"]:
                 if DO_DEBUG:
                     print("DEBUG: GOT NEW CHAT MESSAGE")
                 with self.lock:
-                    self.chats_hisotry[self.active_chat].append(message)
-
-            elif message_type == "user_join":
-                self.active_chat_users.append(message['about_user'])
-                self.build_active_user_box()
-
-            elif message_type == "user_leave":
-                self.active_chat_users.remove(message['about_user'])
-                self.build_active_user_box()
-
-            self.print_chat()
+                    self.update_buffer.append(message)
+                    self.message_set.set()
 
     def wait_for_message(self):
-        if DO_DEBUG:
-            print("DEBUG: BEGINNING TO WAIT FOR INCOMING MESSAGE")
         while True:
             try:
                 message_len_encoded = self.user_socket.recv(8)
@@ -103,120 +103,170 @@ class server_communications_thread(threading.Thread):
         return response
 
     def get_response(self):
-        self.message_set.wait()
+        self.response_set.wait()
         response = self.response
-        self.message_set.clear()
+        self.response_set.clear()
         return response
 
-    def build_active_user_box(self):
-        if len(self.active_chat_users) == 1:
-            self.active_user_box = "[It's Just You Here]"
-            return
-        self.active_user_box = "[Active Users: "
-        for username in self.active_chat_users:
-            if not self.active_user_box == "[Active Users: ":
-                self.active_user_box += ', '
-            self.active_user_box += username
-        self.active_user_box += "]"
-
-    def print_chat(self):
-        if DO_DEBUG:
-            print(" ## DEBUG: BEGIN WRITING CHAT ## ")
+    def dequeue_update_buffer(self, window):
+        while self.active_chat != None:
+            self.message_set.wait()
             with self.lock:
-                for message in self.chats_hisotry[self.active_chat]:
-                    print(f"{message}")
-            print(" ## DEBUG: END WRITING CHAT ## ")
-            return
-        terminal_size = os.get_terminal_size()
-        terminal_width = terminal_size.columns
-        terminal_height = terminal_size.lines
-        os.system('clear')
-        print("\n" * terminal_height)
-        max_message_width = int(terminal_width * (2 / 3))
+                while self.update_buffer:
+                    top_message = self.update_buffer.pop(0)
+                    if top_message['historical'] == True:
+                        self.chat_histories[self.active_chat][top_message['message_id']] = top_message
+                    self.print_message(top_message, window)
+            self.message_set.clear()
 
-        with self.lock:
-            for message in self.chats_hisotry[self.active_chat]:
-                message_type = message['message_type']
-                if message_type in ["user_join", "user_leave"]:
-                    continue
-                print("")
-                if message_type == "standard":
-                    text = message['text']
-                    sender = message['sender']
-                    if sender == self.username:
-                        print(f"{'(' + sender + ')' : >{terminal_width}}")
-                        while text:
-                            next_space = text[max_message_width:].find(' ')
-                            print(f"{text[:max_message_width + next_space] : >{terminal_width}}")
-                            text = text[max_message_width + next_space:]
-                    else:
-                        print(f"({sender})\n{text}")
-                elif message_type == "add_user":
-                    print(f"{'[' + message['about_user'] + ' has been added to this chat!]' : ^{terminal_width}}")
-                elif message_type == "remove_user":
-                    print(f"{'[' + message['about_user'] + ' has been removed from this chat]' : ^{terminal_width}}")
-                elif message_type == "newchat":
-                    print(f"{'[This is the beginning of chat #' + str(message['chat_id']) + '! Go nuts!]' : ^{terminal_width}}")
+    # 'user' is the user that should be added or removed from the active users list.
+    # 'add_user' is only used when user is passed. A True value means that user will be added to the list, if not found in list,
+    # and false means user will be removed if they are.
+    #
+    # If user is not passed, it will simply load 'self.active_chat_users' into the window,
+    # this most likely will do nothing unless active_chat_users has been modified elsewhere
+    def update_active_users(self, window, user=None, add_user=False):
+        if user:
+            if add_user == True and user not in self.active_chat_users:
+                self.active_chat_users.append(user)
+            elif add_user == False and user in self.active_chat_users:
+                self.active_chat_users.remove(user)
 
-        print("")
-        if self.active_user_box != None:
-            print("=" * int((terminal_width - len(self.active_user_box)) / 2), end='')
-            print(self.active_user_box, end='')
-            print("=" * int((terminal_width - len(self.active_user_box)) / 2))
+        # Build active users string from active users list, and send it to the window
+        if len(self.active_chat_users) > 0:
+            active_users_string = "Online: " + ",".join([username for username in self.active_chat_users])
         else:
-            print("=" * terminal_width)
+            active_users_string = "It's just you here..."
+        window['active_users'].update(active_users_string)
 
+    def print_message(self, message, window):
+        if DO_DEBUG:
+            print(f"{message}")
+        else:
+            message_type = message['message_type']
+            if message_type == "user_join":
+                self.update_active_users(window, user=message['about_user'], add_user=True)
+            elif message_type == "user_leave":
+                self.update_active_users(window, user=message['about_user'], add_user=False)
+            print(message)
+            timestamp = int(message['timestamp'])
+            datetime_timestamp = datetime.fromtimestamp(timestamp)
+            time_string = "at " + datetime.strftime(datetime_timestamp, "%-I:%M %p")
+            if (days_ago := (datetime.today().date() - datetime_timestamp.date()).days) == 0:
+                date_string = "Today "
+            elif days_ago == 1:
+                date_string = "Yesterday "
+            elif days_ago <= 5:
+                date_string = str(days_ago) + "days ago "
+            else:
+                date_string = "On " + datetime.strftime(datetime_timestamp, "%b %-m")
+
+            full_time_string = date_string + time_string
+
+            if message_type == "standard":
+                text = message['text']
+                sender = message['sender']
+                prev_message = self.chat_histories[self.active_chat][message['message_id'] - 1]
+                prev_sender = prev_message['sender']
+                prev_timestamp = prev_message['timestamp']
+                should_print_time = not prev_sender == sender or timedelta(
+                    seconds=(timestamp - prev_timestamp)) > timedelta(minutes=5)
+
+                if sender == self.username:
+                    if should_print_time:
+                        gp(f"\nYou {full_time_string}", justification='r', font='Consolas 10')
+                    gp(f"{text}", justification='r')
+                else:
+                    if should_print_time:
+                        gp(f"\n{sender} {full_time_string}", justification='l', font='Consolas 10')
+                    gp(f"{text}", justification='l')
+
+            elif message_type == "add_user":
+                gp(f"\n{full_time_string}", justification='c', font='Consolas 10')
+                gp(f"{'[' + message['about_user'] + ' has been added to this chat!]'}", justification='c')
+            elif message_type == "remove_user":
+                gp(f"\n{full_time_string}", justification='c', font='Consolas 10')
+                gp(f"{'[' + message['about_user'] + ' has been removed from this chat]'}", justification='c')
+            elif message_type == "newchat":
+                gp(f"\n{full_time_string}", justification='c', font='Consolas 10')
+                gp(f"{'[This is the beginning of ' + str(message['chat_name']) + '! Go nuts!]'}", justification='c')
+
+    # Mega "set state" function for loading the environment to do live chatting
     def load_chat(self, chat_id):
+        # Notify server that client is loading chat
         new_chat_state = {
             "endpoint": 'change_active_chat',
             "chat_id": chat_id
         }
         response = self.send_to_server(new_chat_state)
         if response['status'] == 'joinedchat':
+            # TODO, server returns the ID of the most up to date message.
+            # This can be used to check if a reuqest for newer messages is required
             latest_message_server = response['newest_message']
+            chat_name = response['chat_name']
         else:
-            return False
+            return None  # Server did not authenticate the chat join
 
-        if not self.chats_hisotry.get(chat_id):
-            self.chats_hisotry[chat_id] = []
-        if len(self.chats_hisotry[chat_id]) == 0:
-            last_message_id = -1
-        else:
-            last_message_id = self.chats_hisotry[chat_id][-1]['message_id']
-
-        if latest_message_server < last_message_id:
-            if DO_DEBUG:
-                print("DEBUG: NO NEW MESSAGES")
-        else:
-            payload = {
-                "endpoint": 'chat_history',
-                "method": 'GET',
-                "chat_id": chat_id,
-                "last_message_id": last_message_id
-            }
-            response = self.send_to_server(payload)
-            self.chats_hisotry[chat_id].extend(response['messages'])
-
+        # Part of TODO above, only get needed chat history instead of the whole thing every time
+        payload = {
+            "endpoint": 'chat_history',
+            "method": 'GET',
+            "chat_id": chat_id,
+            "last_message_id": -1  # TODO placeholder while not storing local message history
+        }
+        response = self.send_to_server(payload)
+        with self.lock:
+            self.update_buffer.extend(response['messages'])  # Load up the buffer with "new" (TODO) messages
+            self.message_set.set()  # Initial unblock for printer thread
+        if not self.chat_histories.get(chat_id):
+            self.chat_histories[chat_id] = {}
+        # Request list of users that are currently in this chat
         payload = {
             "endpoint": 'get_active_users',
             "chat_id": chat_id
         }
         response = self.send_to_server(payload)
-        if response['active_users'] != None:
-            self.active_chat_users = response['active_users']
-            self.build_active_user_box()
+        self.active_chat_users = response['active_users']
+
+        # Set local active chat
         self.active_chat = chat_id
         if DO_DEBUG:
             print(f"DEBUG: SET ACTIVE CHAT TO #{chat_id}")
-        self.print_chat()
-        return True
+
+        # Load gooey friend
+        if not DO_DEBUG:
+            window = self.load_gooey(chat_name)  # Get the window
+        else:
+            window = None  # Don't get the window... I'm sure this was clear
+
+        self.update_active_users(window=window)  # Write the up-to-date active user list to the window
+
+        # Start printer function, this will start printing right on the "start" line, so everything must be ready by this point
+        self.printer_thread = threading.Thread(target=self.dequeue_update_buffer, args=[window])
+        self.printer_thread.start()
+
+        return window
+
+    def load_gooey(self, chat_name):
+        gooey.theme('DarkGrey14')
+        layout = [[gooey.Text(f'Welcome to {chat_name}!', font='Consolas 25'), gooey.Button('Exit')],
+                  [gooey.Multiline(size=(console_width, console_height), key='-ML-', autoscroll=False,
+                                   auto_refresh=True, write_only=True, reroute_cprint=True, font='Consolas 20')],
+                  [gooey.Input(key='user_input', size=(console_width, 1),
+                               do_not_clear=False, font='Consolas 20'), gooey.Button('Send')],
+                  [gooey.StatusBar('', key='active_users', size=(20, 1), justification='l', font='Consolas 15')]]
+        window = gooey.Window('superchat v0.1', layout, finalize=True)
+        window['user_input'].bind("<Return>", "_Enter")
+        return window
 
     def leave_chat(self):
         self.active_chat = None
         self.active_user_box = None
+        self.message_set.set()
+        self.printer_thread.join()
         new_chat_state = {
             "endpoint": 'change_active_chat',
-            "chat_id": self.active_chat
+            "chat_id": None
         }
         response = self.send_to_server(new_chat_state)
 
@@ -234,28 +284,34 @@ class User:
         self.host = host
 
     def do_chat(self, chat_id):
-        if not self.comm_thread.load_chat(chat_id):
-            print("You do not have access to that chat")
-            self.comm_thread.leave_chat()
-            return
+        window = self.comm_thread.load_chat(chat_id)
         while True:
             if DO_DEBUG:
-                print("DEBUG: ASKING FOR USER INPUT")
-            new_message = input("")
+                new_message = input("USER_INPUT: ")
+            else:
+                event, values = window.read()
+                if event == gooey.WIN_CLOSED or event == 'Exit':
+                    break
+                elif event == "user_input" + "_Enter" or event == 'Send':
+                    new_message = values['user_input']
+                else:
+                    continue
             if new_message == "":
-                self.comm_thread.print_chat()
                 continue
             elif new_message.lower() == "exit":
                 break
             payload = {
-                "endpoint": 'message',
+                "endpoint": 'send_message',
                 "method": 'POST',
                 "msg": new_message,
-                "chat_id": chat_id
+                "chat_id": chat_id,
+                "timestamp": time()
             }
             response = self.comm_thread.send_to_server(payload=payload)
             if response == None:
                 break
+        if not DO_DEBUG:
+            window.close()
         self.comm_thread.leave_chat()
 
     def login(self):

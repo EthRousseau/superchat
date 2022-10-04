@@ -6,47 +6,31 @@ import sys
 import threading
 import traceback
 import select
+from time import time
 
 
 class chat():
 
-    def __init__(self, id, users=None):
-        self.chat_id = id
-        self.chat_lock = threading.Lock()
+    def __init__(self, id, chat_name=None):
         self.message_history = {}  # Dict of message history for this chat instance. Keys are ints in accending order inc by 1
-
-        # Dict of updates to this chat i.e. userjoin, etc.
-        # Keys are saem as message_hisotry, and will be slotted in as if it were another message:
-        # i.e. if the most recent MESSAGE is #5 then the next UPDATE will be #6, even if there are no updates yet
-        self.update_history = {}
-
-        self.all_history = {}
-
         self.users = {}  # Dict of user_thread that have access to this chat
-        if users:
-            for user_thread in users:
-                self.add_user(user_thread)
-
         self.active_users = {}  # Dict of user_thread that are currently looking at this chat
+        self.chat_lock = threading.Lock()
+        self.chat_id = id
+        if chat_name:
+            self.chat_name = chat_name
+        else:
+            self.chat_name = "default_chat_name"
 
-    def add_message(self, message):
+    def send_message(self, message):
         with self.chat_lock:
             message['chat_id'] = self.chat_id
-            message_id = message['message_id'] = len(self.all_history)
-            self.message_history[message_id] = message
-            self.all_history[message_id] = message
+            if message['historical'] == True:
+                message_id = message['message_id'] = len(self.message_history)
+                self.message_history[message_id] = message
 
         for user in self.active_users.values():
             user.send_message(message)
-
-    def send_update(self, update):
-        update['chat_id'] = self.chat_id
-        with self.chat_lock:
-            message_id = update['message_id'] = len(self.all_history)
-            self.update_history[message_id] = update
-            self.all_history[message_id] = update
-        for user in self.active_users.values():
-            user.send_message(update)
 
     def add_user(self, user):  # Perminantly add a user to this chat, state persists after user goes offline
         with self.chat_lock:
@@ -59,9 +43,11 @@ class chat():
         user_join_message = {
             "message_type": 'add_user',
             "sender": "SERVER",
-            "about_user": user.username
+            "about_user": user.username,
+            "timestamp": time(),
+            "historical": True
         }
-        self.send_update(user_join_message)
+        self.send_message(user_join_message)
 
     def remove_user(self, user):  # Perminantly remove a user from this chat, state persists after user goes offline
         with self.chat_lock:
@@ -74,9 +60,11 @@ class chat():
         user_remove_message = {
             "message_type": 'remove_user',
             "sender": "SERVER",
-            "about_user": user.username
+            "about_user": user.username,
+            "timestamp": time(),
+            "historical": True
         }
-        self.send_update(user_remove_message)
+        self.send_message(user_remove_message)
 
     def user_join(self, user):  # User is now online and in this chat
         with self.chat_lock:
@@ -84,9 +72,10 @@ class chat():
         user_join_message = {
             "message_type": 'user_join',
             "sender": "SERVER",
-            "about_user": user.username
+            "about_user": user.username,
+            "historical": False
         }
-        self.send_update(user_join_message)
+        self.send_message(user_join_message)
 
     def user_leave(self, user):  # User was active this chat, and is no longer. Still could have access to it
         if self.active_users.get(user.username):
@@ -95,17 +84,18 @@ class chat():
             user_leave_message = {
                 "message_type": 'user_leave',
                 "sender": "SERVER",
-                "about_user": user.username
+                "about_user": user.username,
+                "historical": False
             }
-            self.send_update(user_leave_message)
+            self.send_message(user_leave_message)
 
     def get_chat_history(self, last_message):
         with self.chat_lock:
-            return list(self.all_history.values())[last_message + 1:]
+            return list(self.message_history.values())[last_message + 1:]
 
     def get_latest_message_id(self):
         with self.chat_lock:
-            return len(self.all_history) - 1
+            return len(self.message_history) - 1
 
     def get_active_users(self):  # returns a list of usernames of active users in this chat
         return list(self.active_users.keys())
@@ -186,18 +176,17 @@ class userThread():
     # i.e. returns truthyness of "connection will continue"
     # user_msg is expected to be string, not byes
     def handle_user_message(self, user_msg):
-        if DO_DEBUG:
-            print(f"DEBUG: GOT {user_msg} FROM {self.username}")
-
         method = user_msg.get('method')
         match user_msg['endpoint']:
 
-            case "message":
+            case "send_message":
                 if method == "POST":
                     new_message = {
                         "message_type": 'standard',
                         "sender": self.username,
-                        "text": user_msg['msg']
+                        "text": user_msg['msg'],
+                        "timestamp": user_msg['timestamp'],
+                        "historical": True
                     }
                     server_obj.add_message_to_chat(new_message, user_msg['chat_id'])
                     response = {
@@ -249,6 +238,7 @@ class userThread():
                     response = {
                         "status": "joinedchat",
                         "chat_id": chat_id,
+                        "chat_name": chat.chat_name,
                         "newest_message": chat.get_latest_message_id()
                     }
                 else:
@@ -258,6 +248,7 @@ class userThread():
 
             case "get_active_users":
                 users_list = self.chats.get(user_msg['chat_id']).get_active_users()
+                users_list.remove(self.username)
                 response = {
                     "active_users": users_list
                 }
@@ -322,7 +313,7 @@ class Server:
     def set_user_offline(self, user_thread):
         with self.server_lock:
             print(f"{user_thread.username} is going offline")
-            if active_chat := user_thread.get_active_chat() != None:
+            if (active_chat := user_thread.get_active_chat()) != None:
                 user_thread.set_active_chat(None)
                 self.all_chats[active_chat].user_leave(user_thread)
             del self.connected_users[user_thread.username]
@@ -364,8 +355,9 @@ class Server:
 
             user_thread.start_user_thread()
         except:
-            print(f"ERROR: Could not initialize user connection for {user_address}")
+            user_socket.close()
             logging.error(traceback.format_exc())
+            print(f"ERROR: Could not initialize user connection for {user_address}")
 
     def send_message(self, payload, user_socket, user_address):
         json_string = json.dumps(payload)
@@ -411,9 +403,12 @@ class Server:
             new_chat = chat(new_chat_id)
             self.all_chats[new_chat_id] = new_chat
         new_chat_message = {
-            "message_type": "newchat"
+            "message_type": "newchat",
+            "chat_name": new_chat.chat_name,
+            "timestamp": time(),
+            "historical": True
         }
-        new_chat.send_update(new_chat_message)
+        new_chat.send_message(new_chat_message)
         return new_chat
 
     def add_user_to_chat(self, user_thread, chat):
@@ -424,7 +419,7 @@ class Server:
         chat = self.all_chats.get(chat_id)
         if not chat:
             raise Exception("ERROR: Chat ID not found")
-        chat.add_message(message)
+        chat.send_message(message)
 
     # Run server
     def run(self):
