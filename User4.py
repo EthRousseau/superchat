@@ -141,14 +141,13 @@ class server_communications_thread(threading.Thread):
 
     def print_message(self, message, window):
         if DO_DEBUG:
-            print(f"{message}")
+            print(f"DEBUG: PRINTING {message}")
         else:
             message_type = message['message_type']
             if message_type == "user_join":
                 self.update_active_users(window, user=message['about_user'], add_user=True)
             elif message_type == "user_leave":
                 self.update_active_users(window, user=message['about_user'], add_user=False)
-            print(message)
             timestamp = int(message['timestamp'])
             datetime_timestamp = datetime.fromtimestamp(timestamp)
             time_string = "at " + datetime.strftime(datetime_timestamp, "%-I:%M %p")
