@@ -116,7 +116,12 @@ class server_communications_thread(threading.Thread):
                     top_message = self.update_buffer.pop(0)
                     if top_message['historical'] == True:
                         self.chat_histories[self.active_chat][top_message['message_id']] = top_message
-                    self.print_message(top_message, window)
+                    try:
+                        self.print_message(top_message, window)
+                    except:
+                        logging.error(traceback.format_exc())
+                        raise Exception(f"FAILED TO PRINT MESSAGE: {top_message}")
+
             self.message_set.clear()
 
     # 'user' is the user that should be added or removed from the active users list.
@@ -363,8 +368,11 @@ class User:
             "endpoint": 'get_chats',
         }
         response = self.comm_thread.send_to_server(payload)
-        self.do_chat(response['chat_ids'][0])
-
+        try:
+            self.do_chat(response['chat_ids'][0])
+        except:
+            logging.error(traceback.format_exc())
+        user_socket.close()
         return
 
 

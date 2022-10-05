@@ -73,6 +73,7 @@ class chat():
             "message_type": 'user_join',
             "sender": "SERVER",
             "about_user": user.username,
+            "timestamp": time(),
             "historical": False
         }
         self.send_message(user_join_message)
@@ -85,6 +86,7 @@ class chat():
                 "message_type": 'user_leave',
                 "sender": "SERVER",
                 "about_user": user.username,
+                "timestamp": time(),
                 "historical": False
             }
             self.send_message(user_leave_message)
